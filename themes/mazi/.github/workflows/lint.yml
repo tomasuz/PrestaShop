@@ -1,0 +1,43 @@
+name: Lint
+on: [ push, pull_request ]
+jobs:
+  stylelint_prettier:
+    name: Stylelint & Prettier
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup
+
+      - name: Run Prettier check
+        run: |
+          npm run prettier || {
+            echo "::error::Prettier check failed. Run 'npm run prettier:fix' to format your code."
+            exit 1
+          }
+
+      - name: Run Stylelint check
+        run: |
+          npm run stylelint || {
+            echo "::error::Stylelint check failed. Run 'npm run stylelint:fix' to autofix issues."
+            exit 1
+          }
+
+  eslint:
+    name: ESLint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup
+
+      - name: Run ESLint check
+        run: |
+          npm run lint || {
+            echo "::error::ESLint check failed. Run 'npm run lint:fix' to format your code."
+            exit 1
+          }
