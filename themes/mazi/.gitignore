@@ -8,6 +8,7 @@ vendor/
 # Build Outputs & Compiled Assets
 # ==========================================
 storybook-static/
+assets/cache/
 
 # ==========================================
 # Environment Variables & Secrets
