@@ -12,13 +12,13 @@ use PrestaShopBundle\ApiPlatform\DefaultValuesTrait;
 use PrestaShopBundle\ApiPlatform\LocalizedValueUpdater;
 use PrestaShopBundle\ApiPlatform\Metadata\LocalizedValue;
 use PrestaShopBundle\ApiPlatform\NormalizationMapper;
+use PrestaShopBundle\ApiPlatform\Normalizer\CQRSApiNormalizer;
 use PrestaShopBundle\ApiPlatform\PositionCollectionUpdater;
-use ReflectionNamedType;
+use Symfony\Component\PropertyInfo\PropertyTypeExtractorInterface;
+use Symfony\Component\PropertyInfo\Type;
 use Symfony\Component\Serializer\Encoder\ContextAwareDecoderInterface;
 use Symfony\Component\Serializer\Encoder\ContextAwareEncoderInterface;
 use Symfony\Component\Serializer\Exception\UnsupportedFormatException;
-use Symfony\Component\Serializer\Mapping\Factory\ClassMetadataFactoryInterface;
-use Symfony\Component\Serializer\Normalizer\AbstractNormalizer;
 use Symfony\Component\Serializer\Normalizer\ContextAwareDenormalizerInterface;
 use Symfony\Component\Serializer\Normalizer\ContextAwareNormalizerInterface;
 use Symfony\Component\Serializer\Serializer;
@@ -37,10 +37,10 @@ class CQRSApiSerializer implements SerializerInterface, ContextAwareNormalizerIn
     public function __construct(
         protected readonly Serializer $decorated,
         protected readonly ContextParametersProvider $contextParametersProvider,
-        protected readonly ClassMetadataFactoryInterface $classMetadataFactory,
         protected readonly LocalizedValueUpdater $localizedValueUpdater,
         protected readonly NormalizationMapper $normalizationMapper,
         protected readonly PositionCollectionUpdater $positionCollectionUpdater,
+        protected readonly PropertyTypeExtractorInterface $propertyTypeExtractor,
     ) {
     }
 
@@ -90,16 +90,33 @@ class CQRSApiSerializer implements SerializerInterface, ContextAwareNormalizerIn
             $data = $this->applyDefaultValues($data, $context['operation'] ?? null);
         }
 
+        // A request body is converted into a CQRS command based on language IDs: the localized values of its sub objects
+        // are converted before the mapping, so that the mapped copies are converted too (the root ones are handled by the
+        // CQRSApiNormalizer). The resource is validated on the request values, so the data before the conversion is kept.
+        $isCommandInput = is_array($data) && !empty($context['input']['class']) && $context['input']['class'] !== $type;
+        if ($isCommandInput) {
+            $resourceData = $data;
+            $resourceContext = $context;
+            $this->normalizationMapper->mapNormalizedData($resourceData, $resourceContext);
+            $context[CQRSApiNormalizer::RESOURCE_DATA] = $this->denormalizeLocalizedValues($resourceData, $type, $resourceContext);
+            $data = $this->updateSubObjectsLocalizedValues($data, $type, [LocalizedValue::DENORMALIZED_KEY => LocalizedValue::ID_KEY], true);
+        }
+
         // Before anything perform the mapping if specified
         $this->normalizationMapper->mapNormalizedData($data, $context);
 
         // Boolean casting is only implemented in Serializer 7.1, so for now we handle it manually
-        // This is important for list results mainly where boolean are returned as tiny int (0, 1)
-        $this->addBooleanCastCallbacks($type, $context);
+        // This is important for query results where boolean are returned as tiny int (0, 1)
+        if (!empty($context[self::CAST_BOOL]) && is_array($data)) {
+            $data = $this->castBooleans($data, $type);
+        }
 
         // Update localized value to be adapted for denormalization
         if (is_array($data)) {
             $data = $this->denormalizeLocalizedValues($data, $type, $context);
+            if (!$isCommandInput) {
+                $data = $this->updateSubObjectsLocalizedValues($data, $type, $context, true);
+            }
         }
 
         return $this->decorated->denormalize($data, $type, $format, $context);
@@ -118,6 +135,9 @@ class CQRSApiSerializer implements SerializerInterface, ContextAwareNormalizerIn
         // Then update the localized values to use the appropriate indexes
         if (is_object($object) && class_exists(get_class($object))) {
             $normalizedData = $this->normalizeLocalizedValues($normalizedData, get_class($object), $context);
+            if (is_array($normalizedData)) {
+                $normalizedData = $this->updateSubObjectsLocalizedValues($normalizedData, get_class($object), $context, false);
+            }
             $normalizedData = $this->positionCollectionUpdater->normalizePositionCollection($normalizedData, get_class($object));
         }
 
@@ -186,36 +206,114 @@ class CQRSApiSerializer implements SerializerInterface, ContextAwareNormalizerIn
     }
 
     /**
-     * Force casting boolean properties so that values like (1, 0, true, on, false, ...) are valid, this is useful for
-     * data coming from DB where boolean are returned as tiny integers. To enable this casting the CQRSApiSerializer::CAST_BOOL
-     * context option must be true.
-     *
-     * Note: in Symfony 7.1 a new option AbstractNormalizer::FILTER_BOOL has been introduced, when we upgrade our
-     * Symfony dependencies our custom casting (inspired by the Symfony one) can be removed.
-     *
-     * https://symfony.com/doc/7.1/serializer.html#handling-boolean-values
+     * The localized values of the sub objects of the API resources (DTOs, and lists of DTOs typed with a PHPDoc like
+     * Foo[]) are converted like the ones of the resource, at every level.
      */
-    protected function addBooleanCastCallbacks(string $type, array &$context): void
+    protected function updateSubObjectsLocalizedValues(array $data, string $type, array $context, bool $denormalize): array
     {
-        if (empty($context[self::CAST_BOOL])) {
-            return;
+        if (!class_exists($type)) {
+            return $data;
         }
 
-        if (!$this->classMetadataFactory->hasMetadataFor($type)) {
-            return;
-        }
-
-        $metadata = $this->classMetadataFactory->getMetadataFor($type);
-        foreach ($metadata->getAttributesMetadata() as $attributeMetadata) {
-            if (!$metadata->getReflectionClass()->hasProperty($attributeMetadata->getName())) {
+        // The mapping and the localized parameters of the context are those of the root object
+        $subObjectContext = array_diff_key($context, [
+            NormalizationMapper::NORMALIZATION_MAPPING => true,
+            NormalizationMapper::APPLIED_NORMALIZATION_MAPPING => true,
+            LocalizedValue::LOCALIZED_VALUE_PARAMETERS => true,
+            'operation' => true,
+        ]);
+        foreach ($data as $property => $value) {
+            if (!is_string($property) || !is_array($value) || empty($value)) {
                 continue;
             }
 
-            $reflectionProperty = $metadata->getReflectionClass()->getProperty($attributeMetadata->getName());
-            if ($reflectionProperty->getType() instanceof ReflectionNamedType && $reflectionProperty->getType()->getName() === 'bool') {
-                $context[AbstractNormalizer::CALLBACKS][$attributeMetadata->getName()] = fn (mixed $value): bool => filter_var($value, FILTER_VALIDATE_BOOLEAN);
+            foreach ($this->propertyTypeExtractor->getTypes($type, $property) ?? [] as $propertyType) {
+                $subObjectClass = $propertyType->getClassName();
+                if (null !== $subObjectClass && $this->isApiResourceSubObject($subObjectClass)) {
+                    $data[$property] = $this->updateLocalizedValues($value, $subObjectClass, $subObjectContext, $denormalize);
+                    break;
+                }
+
+                $itemClass = $propertyType->isCollection() ? ($propertyType->getCollectionValueTypes()[0] ?? null)?->getClassName() : null;
+                if (null !== $itemClass && $this->isApiResourceSubObject($itemClass)) {
+                    foreach ($value as $key => $item) {
+                        if (is_array($item)) {
+                            $data[$property][$key] = $this->updateLocalizedValues($item, $itemClass, $subObjectContext, $denormalize);
+                        }
+                    }
+                    break;
+                }
             }
         }
+
+        return $data;
+    }
+
+    protected function updateLocalizedValues(array $data, string $type, array $context, bool $denormalize): array
+    {
+        $data = $denormalize ? $this->denormalizeLocalizedValues($data, $type, $context) : $this->normalizeLocalizedValues($data, $type, $context);
+
+        return $this->updateSubObjectsLocalizedValues($data, $type, $context, $denormalize);
+    }
+
+    protected function isApiResourceSubObject(string $class): bool
+    {
+        return str_contains($class, '\\ApiPlatform\\Resources\\');
+    }
+
+    /**
+     * Casts the values of the boolean properties (1, 0, "1", "true", "on", ...) when the CQRSApiSerializer::CAST_BOOL
+     * context option is true, useful for query results where booleans are returned as tiny integers. The nested
+     * objects and the lists of objects (typed with a PHPDoc like Foo[]) are cast too. A value that doesn't
+     * represent a boolean is left untouched, so the denormalization still rejects it.
+     *
+     * Note: in Symfony 7.1 a new option AbstractNormalizer::FILTER_BOOL has been introduced, but it doesn't cast
+     * integers.
+     */
+    protected function castBooleans(array $data, string $type): array
+    {
+        if (!class_exists($type)) {
+            return $data;
+        }
+
+        foreach ($data as $property => $value) {
+            if (!is_string($property) || null === $value) {
+                continue;
+            }
+
+            $types = $this->propertyTypeExtractor->getTypes($type, $property);
+            // Union types are ambiguous, the value is left as is
+            if (null === $types || count($types) !== 1) {
+                continue;
+            }
+
+            $propertyType = $types[0];
+            if (Type::BUILTIN_TYPE_BOOL === $propertyType->getBuiltinType()) {
+                $data[$property] = $this->castBoolean($value);
+            } elseif (is_array($value) && null !== $propertyType->getClassName()) {
+                $data[$property] = $this->castBooleans($value, $propertyType->getClassName());
+            } elseif (is_array($value) && $propertyType->isCollection()) {
+                $itemClass = ($propertyType->getCollectionValueTypes()[0] ?? null)?->getClassName();
+                if (null !== $itemClass) {
+                    foreach ($value as $key => $item) {
+                        if (is_array($item)) {
+                            $data[$property][$key] = $this->castBooleans($item, $itemClass);
+                        }
+                    }
+                }
+            }
+        }
+
+        return $data;
+    }
+
+    protected function castBoolean(mixed $value): mixed
+    {
+        if (!is_scalar($value)) {
+            return $value;
+        }
+
+        return filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? $value;
     }
 
     /**

@@ -43,9 +43,11 @@ use PrestaShop\PrestaShop\Core\Domain\Cart\Exception\CartException;
 use PrestaShop\PrestaShop\Core\Domain\Cart\Exception\CartNotFoundException;
 use PrestaShop\PrestaShop\Core\Domain\Cart\Exception\MinimalQuantityException;
 use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartForOrderCreation;
+use PrestaShop\PrestaShop\Core\Domain\Cart\Query\GetCartForViewing;
 use PrestaShop\PrestaShop\Core\Domain\Cart\QueryResult\CartForOrderCreation;
 use PrestaShop\PrestaShop\Core\Domain\Cart\ValueObject\CartId;
 use PrestaShop\PrestaShop\Core\Domain\CartRule\Exception\CartRuleValidityException;
+use PrestaShop\PrestaShop\Core\Domain\Customer\Exception\CustomerNotFoundException;
 use PrestaShop\PrestaShop\Core\Domain\Product\Customization\ValueObject\CustomizationId;
 use PrestaShop\PrestaShop\Core\Domain\Product\Exception\PackOutOfStockException;
 use PrestaShop\PrestaShop\Core\Domain\Product\Exception\ProductCustomizationNotFoundException;
@@ -114,12 +116,18 @@ class CartFeatureContext extends AbstractDomainFeatureContext
         Cart::resetStaticCache();
         $customerId = SharedStorage::getStorage()->get($customerReference);
 
-        /** @var CartId $cartIdObject */
-        $cartIdObject = $this->getCommandBus()->handle(
-            new CreateEmptyCustomerCartCommand(
-                (int) $customerId
-            )
-        );
+        try {
+            /** @var CartId $cartIdObject */
+            $cartIdObject = $this->getCommandBus()->handle(
+                new CreateEmptyCustomerCartCommand(
+                    (int) $customerId
+                )
+            );
+        } catch (CustomerNotFoundException $e) {
+            $this->setLastException($e);
+
+            return;
+        }
         // Reset context's cart to avoid one from former tests to be used with invalid values (like non existent addresses)
         Context::getContext()->cart = new Cart($cartIdObject->getValue());
 
@@ -1327,6 +1335,24 @@ class CartFeatureContext extends AbstractDomainFeatureContext
         }
 
         $this->assertLastErrorIs(CartNotFoundException::class);
+    }
+
+    /**
+     * @When I view the current cart in the back office
+     */
+    public function viewCurrentCartInBackOffice(): void
+    {
+        $this->getQueryBus()->handle(new GetCartForViewing((int) Context::getContext()->cart->id));
+    }
+
+    /**
+     * @Then the current cart should have :count cart rules
+     */
+    public function currentCartShouldHaveCartRules(int $count): void
+    {
+        $cart = new Cart((int) Context::getContext()->cart->id);
+
+        Assert::assertCount($count, $cart->getCartRules(CartRule::FILTER_ACTION_ALL, false));
     }
 
     /**

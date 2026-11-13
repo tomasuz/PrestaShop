@@ -174,8 +174,8 @@ final class ExtraPropertyDefinition
      * Physical entity table name (without DB prefix) — the base of every storage table
      * name ({table}_extra, {table}_extra_lang, {table}_extra_shop) and of the base-table
      * existence checks. Resolved at construction: explicit constructor value (third-party
-     * ObjectModels whose entity name differs from their table) → the entity's ObjectModel
-     * class $definition['table'] ('combination' → 'product_attribute', 'order' → 'orders')
+     * ObjectModels whose entity name differs from their table) → CANONICAL_ENTITY_TABLES
+     * → the entity's ObjectModel class $definition['table'] ('combination' → 'product_attribute', 'order' → 'orders')
      * → the entity name itself (bare-table registrations). Persisted in the registry
      * (table_name column): the stored value always wins at hydration — fromRow() passes it
      * back explicitly, freezing the storage location against later class changes.
@@ -287,12 +287,15 @@ final class ExtraPropertyDefinition
             : array_values(array_unique(array_map('intval', $associatedShopIds)));
 
         // Entity names are SQL identifier fragments (tables + primary key column):
-        // normalize to lower snake_case before validating and storing — tableize()
-        // converts CamelCase (ProductAttribute → product_attribute), then hyphens
-        // become underscores. Known irregular spellings then converge onto their
-        // canonical entity name ('orders' → 'order', 'product_attribute' →
-        // 'combination') so every spelling of one entity yields one stored definition.
-        $normalizedEntityName = str_replace('-', '_', Inflector::getInflector()->tableize($entityName));
+        // normalize to lower snake_case before validating and storing. Fully uppercase
+        // identifiers are lowercased first so acronyms (CMS → cms) are not split by
+        // tableize(); CamelCase names still follow the regular inflector conversion
+        // (ProductAttribute → product_attribute). Hyphens then become underscores.
+        // Known irregular spellings finally converge onto their canonical entity name
+        // ('orders' → 'order', 'product_attribute' → 'combination') so every spelling
+        // of one entity yields one stored definition.
+        $entityNameForNormalization = strtoupper($entityName) === $entityName ? strtolower($entityName) : $entityName;
+        $normalizedEntityName = str_replace('-', '_', Inflector::getInflector()->tableize($entityNameForNormalization));
         $normalizedEntityName = self::CANONICAL_ENTITY_NAMES[$normalizedEntityName] ?? $normalizedEntityName;
         if (!ExtraPropertyValidator::isTableOrIdentifier($normalizedEntityName)) {
             throw new InvalidExtraPropertyDefinitionException(sprintf(
@@ -667,6 +670,9 @@ final class ExtraPropertyDefinition
      */
     public function withOverrides(array $overrides): self
     {
+        // A new entity re-resolves its storage, unless the override pins it explicitly.
+        $entityChanged = array_key_exists('entityName', $overrides) && $overrides['entityName'] !== $this->entityName;
+
         return new self(
             entityName: array_key_exists('entityName', $overrides) ? $overrides['entityName'] : $this->entityName,
             propertyName: array_key_exists('propertyName', $overrides) ? $overrides['propertyName'] : $this->propertyName,
@@ -692,8 +698,8 @@ final class ExtraPropertyDefinition
             descriptionDomain: array_key_exists('descriptionDomain', $overrides) ? $overrides['descriptionDomain'] : $this->descriptionDomain,
             multiShop: array_key_exists('multiShop', $overrides) ? $overrides['multiShop'] : $this->multiShop,
             associatedShopIds: array_key_exists('associatedShopIds', $overrides) ? $overrides['associatedShopIds'] : $this->associatedShopIds,
-            tableName: array_key_exists('tableName', $overrides) ? $overrides['tableName'] : $this->tableName,
-            primaryKeyName: array_key_exists('primaryKeyName', $overrides) ? $overrides['primaryKeyName'] : $this->primaryKeyName,
+            tableName: array_key_exists('tableName', $overrides) ? $overrides['tableName'] : ($entityChanged ? null : $this->tableName),
+            primaryKeyName: array_key_exists('primaryKeyName', $overrides) ? $overrides['primaryKeyName'] : ($entityChanged ? null : $this->primaryKeyName),
             controllerName: array_key_exists('controllerName', $overrides) ? $overrides['controllerName'] : $this->controllerName,
         );
     }
@@ -807,6 +813,7 @@ final class ExtraPropertyDefinition
 
     /**
      * Returns the parsed Admin API placement entries.
+     * Unused by the core (matchesApi() parses on the fly), kept as public API for modules.
      *
      * @return list<array{path: string, methods: list<string>|null}>
      */

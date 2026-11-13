@@ -8,10 +8,10 @@ declare(strict_types=1);
 namespace PrestaShop\PrestaShop\Adapter\OrderState\CommandHandler;
 
 use OrderState;
+use PrestaShop\PrestaShop\Adapter\Domain\LocalizedObjectModelTrait;
 use PrestaShop\PrestaShop\Core\CommandBus\Attributes\AsCommandHandler;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Command\EditOrderStateCommand;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\CommandHandler\EditOrderStateHandlerInterface;
-use PrestaShop\PrestaShop\Core\Domain\OrderState\Exception\MissingOrderStateRequiredFieldsException;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Exception\OrderStateException;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\OrderStateFileUploaderInterface;
 
@@ -23,6 +23,8 @@ use PrestaShop\PrestaShop\Core\Domain\OrderState\OrderStateFileUploaderInterface
 #[AsCommandHandler]
 final class EditOrderStateHandler extends AbstractOrderStateHandler implements EditOrderStateHandlerInterface
 {
+    use LocalizedObjectModelTrait;
+
     /**
      * @var OrderStateFileUploaderInterface
      */
@@ -63,30 +65,12 @@ final class EditOrderStateHandler extends AbstractOrderStateHandler implements E
         }
     }
 
-    /**
-     * @throws MissingOrderStateRequiredFieldsException
-     */
-    protected function assertRequiredFieldsAreNotMissing(OrderState $orderState)
-    {
-        // Check that we have templates for all languages when send_email is on
-        $haveMissingTemplates = (
-            !is_array($orderState->template)
-            || count($orderState->template) != count(array_filter($orderState->template, function ($v) {
-                return (bool) strlen($v);
-            }))
-        );
-
-        if (true === $orderState->send_email && true === $haveMissingTemplates) {
-            throw new MissingOrderStateRequiredFieldsException(['template'], 'One or more required fields for order state are missing. Missing fields are: template');
-        }
-
-        parent::assertRequiredFieldsAreNotMissing($orderState);
-    }
-
     private function updateOrderStateWithCommandData(OrderState $orderState, EditOrderStateCommand $command)
     {
+        $propertiesToUpdate = [];
+        // The localized values are merged: a language absent from the command keeps its stored value
         if (null !== $command->getName()) {
-            $orderState->name = $command->getName();
+            $this->fillLocalizedValues($orderState, 'name', $command->getName(), $propertiesToUpdate);
         }
 
         if (null !== $command->getColor()) {
@@ -109,7 +93,7 @@ final class EditOrderStateHandler extends AbstractOrderStateHandler implements E
             $orderState->send_email = $command->isSendEmailEnabled();
 
             if ($orderState->send_email && null !== $command->getTemplate()) {
-                $orderState->template = $command->getTemplate();
+                $this->fillLocalizedValues($orderState, 'template', $command->getTemplate(), $propertiesToUpdate);
             }
         }
 

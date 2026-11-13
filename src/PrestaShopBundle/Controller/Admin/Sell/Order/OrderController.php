@@ -166,7 +166,7 @@ class OrderController extends PrestaShopAdminController
                 'help_link' => $this->generateSidebarLink($request->attributes->get('_legacy_controller')),
                 'enableSidebar' => true,
                 'changeOrderStatusesForm' => $changeOrderStatusesForm->createView(),
-                'orderKpi' => $orderKpiFactory->build(),
+                'orderKpi' => ($this->getConfiguration()->get('PS_DISPLAY_BACKOFFICE_KPIS') ?? true) ? $orderKpiFactory->build() : null,
                 'layoutHeaderToolbarBtn' => $this->getOrderToolbarButtons(),
             ]
         );
@@ -1110,7 +1110,7 @@ class OrderController extends PrestaShopAdminController
      *
      * @return Response
      */
-    #[AdminSecurity("is_granted('create', request.get('_legacy_controller'))", redirectRoute: 'admin_orders_index')]
+    #[AdminSecurity("is_granted('update', request.get('_legacy_controller'))", redirectRoute: 'admin_orders_index')]
     public function addProductAction(
         int $orderId,
         Request $request,

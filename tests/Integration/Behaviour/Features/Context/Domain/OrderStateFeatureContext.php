@@ -9,6 +9,7 @@ declare(strict_types=1);
 namespace Tests\Integration\Behaviour\Features\Context\Domain;
 
 use Behat\Gherkin\Node\TableNode;
+use OrderState;
 use PHPUnit\Framework\Assert;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Command\AddOrderStateCommand;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Command\BulkDeleteOrderStateCommand;
@@ -16,6 +17,7 @@ use PrestaShop\PrestaShop\Core\Domain\OrderState\Command\DeleteOrderStateCommand
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Command\EditOrderStateCommand;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Exception\BulkDeleteOrderStateException;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Exception\DeleteOrderStateException;
+use PrestaShop\PrestaShop\Core\Domain\OrderState\Exception\MissingOrderStateRequiredFieldsException;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Exception\OrderStateException;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Exception\OrderStateNotFoundException;
 use PrestaShop\PrestaShop\Core\Domain\OrderState\Query\GetOrderStateForEditing;
@@ -33,14 +35,12 @@ class OrderStateFeatureContext extends AbstractDomainFeatureContext
      */
     public function addNewOrderState(string $orderStateReference, TableNode $table): void
     {
-        $data = $table->getRowsHash();
+        $data = $this->localizeByRows($table);
 
         try {
             /** @var OrderStateId $orderStateId */
             $orderStateId = $this->getCommandBus()->handle(new AddOrderStateCommand(
-                [
-                    $this->getDefaultLangId() => $data['name'],
-                ],
+                $data['name'],
                 $data['color'],
                 (bool) $data['isLoggable'],
                 (bool) $data['isInvoice'],
@@ -51,7 +51,7 @@ class OrderStateFeatureContext extends AbstractDomainFeatureContext
                 (bool) $data['isShipped'],
                 (bool) $data['isPaid'],
                 (bool) $data['isDelivery'],
-                []
+                $data['template'] ?? []
             ));
 
             SharedStorage::getStorage()->set($orderStateReference, $orderStateId->getValue());
@@ -72,11 +72,9 @@ class OrderStateFeatureContext extends AbstractDomainFeatureContext
 
         $editableOrderState = new EditOrderStateCommand((int) $orderStateId);
 
-        $data = $table->getRowsHash();
+        $data = $this->localizeByRows($table);
         if (isset($data['name'])) {
-            $editableOrderState->setName([
-                $this->getDefaultLangId() => $data['name'],
-            ]);
+            $editableOrderState->setName($data['name']);
         }
         if (isset($data['color'])) {
             $editableOrderState->setColor($data['color']);
@@ -106,9 +104,7 @@ class OrderStateFeatureContext extends AbstractDomainFeatureContext
             $editableOrderState->setDelivery((bool) $data['isDelivery']);
         }
         if (isset($data['template'])) {
-            $editableOrderState->setTemplate([
-                $this->getDefaultLangId() => $data['template'],
-            ]);
+            $editableOrderState->setTemplate($data['template']);
         }
 
         try {
@@ -155,6 +151,37 @@ class OrderStateFeatureContext extends AbstractDomainFeatureContext
     }
 
     /**
+     * @Given the order state :orderStateReference is unremovable
+     *
+     * @param string $orderStateReference
+     */
+    public function markOrderStateAsUnremovable(string $orderStateReference): void
+    {
+        // The native states of a shop are unremovable, the API cannot create one
+        $orderState = new OrderState((int) SharedStorage::getStorage()->get($orderStateReference));
+        $orderState->unremovable = true;
+        $orderState->update();
+    }
+
+    /**
+     * @Then I should get an error that the order state templates are missing
+     */
+    public function assertMissingTemplatesError(): void
+    {
+        /** @var MissingOrderStateRequiredFieldsException $exception */
+        $exception = $this->assertLastErrorIs(MissingOrderStateRequiredFieldsException::class);
+        Assert::assertSame(['template'], $exception->getMissingRequiredFields());
+    }
+
+    /**
+     * @Then I should get an error that some order states could not be deleted
+     */
+    public function assertBulkDeleteError(): void
+    {
+        $this->assertLastErrorIs(BulkDeleteOrderStateException::class);
+    }
+
+    /**
      * @Then the order state :orderStateReference should have the following details:
      *
      * @param string $orderStateReference
@@ -166,18 +193,21 @@ class OrderStateFeatureContext extends AbstractDomainFeatureContext
 
         $this->assertLastErrorIsNull();
 
-        $data = $table->getRowsHash();
+        $data = $this->localizeByRows($table);
 
-        $localizedNames = $editableOrderState->getLocalizedNames();
-        $localizedTemplates = $editableOrderState->getLocalizedTemplates();
-        Assert::assertIsArray($localizedNames);
-        Assert::assertArrayHasKey($this->getDefaultLangId(), $localizedNames);
-        Assert::assertEquals($data['name'], $localizedNames[$this->getDefaultLangId()]);
-        Assert::assertEquals($data['color'], $editableOrderState->getColor());
-        Assert::assertEquals((bool) $data['hasSendMail'], $editableOrderState->isSendEmailEnabled());
-        Assert::assertIsArray($localizedTemplates);
-        Assert::assertArrayHasKey($this->getDefaultLangId(), $localizedTemplates);
-        Assert::assertEquals($data['template'], $localizedTemplates[$this->getDefaultLangId()]);
+        // Only the languages listed in the table are checked
+        foreach ($data['name'] ?? [] as $langId => $name) {
+            Assert::assertEquals($name, $editableOrderState->getLocalizedNames()[$langId] ?? null);
+        }
+        foreach ($data['template'] ?? [] as $langId => $template) {
+            Assert::assertEquals($template, $editableOrderState->getLocalizedTemplates()[$langId] ?? null);
+        }
+        if (isset($data['color'])) {
+            Assert::assertEquals($data['color'], $editableOrderState->getColor());
+        }
+        if (isset($data['hasSendMail'])) {
+            Assert::assertEquals((bool) $data['hasSendMail'], $editableOrderState->isSendEmailEnabled());
+        }
     }
 
     /**
